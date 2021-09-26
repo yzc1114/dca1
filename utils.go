@@ -4,13 +4,11 @@ import "sync"
 
 var genNewSnapshotEpoch = func() func()Epoch {
 	mu := &sync.Mutex{}
-	epoch := 1
+	epoch := 0
 	return func() Epoch{
-		defer func() {
-			mu.Lock()
-			defer mu.Unlock()
-			epoch += 1
-		}()
+		mu.Lock()
+		defer mu.Lock()
+		epoch += 1
 		return Epoch(epoch)
 	}
 }()

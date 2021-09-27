@@ -25,11 +25,12 @@ func (m MarkerMsg) String() string {
 
 // Epoch int型，表示全局唯一的一次快照ID，与MarkerMsg内含数值一一对应。
 type Epoch int
+
 // 生成全局唯一的快照ID
-var genNewSnapshotEpoch = func() func()Epoch {
+var genNewSnapshotEpoch = func() func() Epoch {
 	mu := &sync.Mutex{}
 	epoch := 0
-	return func() Epoch{
+	return func() Epoch {
 		mu.Lock()
 		defer mu.Unlock()
 		epoch += 1
@@ -44,9 +45,9 @@ func (m ProcessStatus) String() string {
 	return strconv.Itoa(int(m))
 }
 
-// Msg 程序之间传递的消息，可以是任意值（interface{}），这里用string代替。
-type Msg string // Can be anything
-func (m Msg) String() string {
+// AppMsg 程序之间传递的应用级消息，可以是任意值（interface{}），这里用string代替。
+type AppMsg string // Can be anything
+func (m AppMsg) String() string {
 	return string(m)
 }
 
@@ -67,10 +68,10 @@ func NewFromChanMsgWithName(name string, chanMsg chan ChanMsg) *FromChanMsgWithN
 	}
 }
 
-// DualChanMsgWithName 单向命名通道的实现。
+// DualChanMsgWithName 双向命名通道的实现。
 type DualChanMsgWithName struct {
-	*ToChanMsgWithName
-	*FromChanMsgWithName
+	to   *ToChanMsgWithName
+	from *FromChanMsgWithName
 }
 
 func NewDualChanMsgWithName(name string, chanMsg chan ChanMsg) *DualChanMsgWithName {
@@ -85,7 +86,6 @@ func NewDualChanMsgWithName(name string, chanMsg chan ChanMsg) *DualChanMsgWithN
 		},
 	}
 }
-
 
 // ToChanMsgWithName 单向命名通道的实现。
 type ToChanMsgWithName struct {
@@ -122,7 +122,7 @@ type RecorderMsg struct {
 
 	// For Source == ChanSource
 	ChanName       string
-	RecordedValues []Msg
+	RecordedValues []AppMsg
 }
 
 func NewRecorderMsgChan() chan *RecorderMsg {
@@ -131,9 +131,9 @@ func NewRecorderMsgChan() chan *RecorderMsg {
 
 // ChanPair 针对每个进程提供的一组进出通道。
 type ChanPair struct {
-	ProcessID ProcessID        // 目标进程号
+	ProcessID ProcessID            // 目标进程号
 	fromChan  *FromChanMsgWithName // 从该目标进程到本进程的通道
-	toChan    *ToChanMsgWithName // 从本进程到目标进程的通道
+	toChan    *ToChanMsgWithName   // 从本进程到目标进程的通道
 }
 
 func NewChanPair(pid ProcessID, fromChan *FromChanMsgWithName, toChan *ToChanMsgWithName) *ChanPair {

@@ -19,7 +19,7 @@ func doSnapshotRecorderProcess(ctx context.Context, processCount int, recorderCh
 	type ProcessInfo struct {
 		ProcessID     ProcessID
 		ProcessStatus ProcessStatus
-		Msgs          map[string][]Msg // chan name to msgs
+		Msgs          map[string][]AppMsg // chan name to msgs
 	}
 	type snapshotInfo map[ProcessID]*ProcessInfo
 	type epoch2SnapshotInfo map[Epoch]snapshotInfo
@@ -35,7 +35,7 @@ func doSnapshotRecorderProcess(ctx context.Context, processCount int, recorderCh
 			snapshot[processID] = &ProcessInfo{
 				ProcessID:     processID,
 				ProcessStatus: ProcessStatus(-1),
-				Msgs:          make(map[string][]Msg),
+				Msgs:          make(map[string][]AppMsg),
 			}
 		}
 		return snapshot[recorderMsg.ProcessID]
@@ -152,12 +152,12 @@ func doProcess(ctx context.Context, selfProcessID ProcessID, chanPairs map[Proce
 	}
 
 	// 使用闭包定义在主循环中使用的各类函数。
-	dealWithMarkerMsgIncoming, addRecordMsgIfNecessary := func() (func(markerMsg MarkerMsg, fromProcessID ProcessID), func(fromChanName string, msg Msg)) {
+	dealWithMarkerMsgIncoming, addRecordMsgIfNecessary := func() (func(markerMsg MarkerMsg, fromProcessID ProcessID), func(fromChanName string, msg AppMsg)) {
 		type isRecording struct {
 			ProcessID      ProcessID
 			Recording      bool
 			FromChanName   string
-			RecordedValues []Msg
+			RecordedValues []AppMsg
 		}
 		type recordStatus map[ProcessID]*isRecording // processID2IsRecording
 		type epoch2recordStatus map[Epoch]recordStatus
@@ -177,7 +177,7 @@ func doProcess(ctx context.Context, selfProcessID ProcessID, chanPairs map[Proce
 					ProcessID:      pid,
 					FromChanName:   chanPair.fromChan.Name,
 					Recording:      true,
-					RecordedValues: make([]Msg, 0),
+					RecordedValues: make([]AppMsg, 0),
 				}
 			}
 		}
@@ -225,7 +225,7 @@ func doProcess(ctx context.Context, selfProcessID ProcessID, chanPairs map[Proce
 			}
 		}
 
-		addRecordMsgIfNecessary := func(fromChanName string, msg Msg) {
+		addRecordMsgIfNecessary := func(fromChanName string, msg AppMsg) {
 			for _, rs := range recordStatusForAllEpochs {
 				for _, ir := range rs {
 					if ir.FromChanName == fromChanName && ir.Recording {
@@ -247,12 +247,12 @@ func doProcess(ctx context.Context, selfProcessID ProcessID, chanPairs map[Proce
 				case MarkerMsg:
 					log.Printf("Process %d received MarkerMsg %+v from Process %d", selfProcessID, m.(MarkerMsg), fromProcessID)
 					dealWithMarkerMsgIncoming(m.(MarkerMsg), fromProcessID)
-				case Msg:
-					addRecordMsgIfNecessary(chanPair.fromChan.Name, m.(Msg))
+				case AppMsg:
+					addRecordMsgIfNecessary(chanPair.fromChan.Name, m.(AppMsg))
 					processStatus++
-					log.Printf("Process %d received Msg from Process %d, msg content = [%+v], curr ProcessStatus = %d", selfProcessID, fromProcessID, m.(Msg), processStatus)
+					log.Printf("Process %d received AppMsg from Process %d, msg content = [%+v], curr ProcessStatus = %d", selfProcessID, fromProcessID, m.(AppMsg), processStatus)
 					nextProcessID := getNextProcessID(selfProcessID)
-					log.Printf("Process %d sending Msg to Process %d", selfProcessID, nextProcessID)
+					log.Printf("Process %d sending AppMsg to Process %d", selfProcessID, nextProcessID)
 					nextChanPair := chanPairs[nextProcessID]
 					nextChanPair.toChan.C <- m
 					if shouldStartSnapshot(selfProcessID, ProcessStatus(processStatus)) {
@@ -262,8 +262,8 @@ func doProcess(ctx context.Context, selfProcessID ProcessID, chanPairs map[Proce
 						markerMsg := MarkerMsg(epoch)
 						dealWithMarkerMsgIncoming(markerMsg, selfProcessID)
 					}
-				case ProcessStatus:
-					log.Fatalf("process %d received ProcessStatus", selfProcessID)
+				default:
+					log.Fatalf("process %d received invalid msg = [%+v]", selfProcessID, m)
 				}
 			case <-ctx.Done():
 				// 优雅关停
@@ -323,7 +323,7 @@ func StartRoutines(pids []ProcessID, shouldStartSnapshot func(pid ProcessID, sta
 				cps[otherPid] = NewChanPair(otherPid, fromChans[pid][otherPid], toChans[pid][otherPid])
 			} else {
 				// admin process
-				cps[adminPid] = NewChanPair(adminPid, adminChans[pid].FromChanMsgWithName, adminChans[pid].ToChanMsgWithName)
+				cps[adminPid] = NewChanPair(adminPid, adminChans[pid].from, adminChans[pid].to)
 			}
 		}
 		pid2ChanPairs[pid] = cps
@@ -332,7 +332,7 @@ func StartRoutines(pids []ProcessID, shouldStartSnapshot func(pid ProcessID, sta
 		go doProcess(ctx, pid, cps, recorderChan, shouldStartSnapshot)
 	}
 
-	adminChans[kickerPID].ToChanMsgWithName.C <- Msg("Msg")
+	adminChans[kickerPID].to.C <- AppMsg("AppMsg")
 
 	time.Sleep(60 * time.Second)
 	cancel()

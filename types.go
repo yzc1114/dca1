@@ -2,6 +2,7 @@ package main
 
 import (
 	"strconv"
+	"sync"
 )
 
 const (
@@ -24,6 +25,17 @@ func (m MarkerMsg) String() string {
 
 // Epoch int型，表示全局唯一的一次快照ID，与MarkerMsg内含数值一一对应。
 type Epoch int
+// 生成全局唯一的快照ID
+var genNewSnapshotEpoch = func() func()Epoch {
+	mu := &sync.Mutex{}
+	epoch := 0
+	return func() Epoch{
+		mu.Lock()
+		defer mu.Unlock()
+		epoch += 1
+		return Epoch(epoch)
+	}
+}()
 
 // ProcessStatus 程序状态值。
 type ProcessStatus int

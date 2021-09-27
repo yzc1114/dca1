@@ -7,7 +7,7 @@ var genNewSnapshotEpoch = func() func()Epoch {
 	epoch := 0
 	return func() Epoch{
 		mu.Lock()
-		defer mu.Lock()
+		defer mu.Unlock()
 		epoch += 1
 		return Epoch(epoch)
 	}

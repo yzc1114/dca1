@@ -153,14 +153,14 @@ func doProcess(ctx context.Context, selfProcessID ProcessID, chanPairs map[Proce
 
 	// 使用闭包定义在主循环中使用的各类函数。
 	dealWithMarkerMsgIncoming, addRecordMsgIfNecessary := func() (func(markerMsg MarkerMsg, fromProcessID ProcessID), func(fromChanName string, msg AppMsg)) {
-		type isRecording struct {
+		type recordStatus struct {
 			ProcessID      ProcessID
 			Recording      bool
 			FromChanName   string
 			RecordedValues []AppMsg
 		}
-		type recordStatus map[ProcessID]*isRecording // processID2IsRecording
-		type epoch2recordStatus map[Epoch]recordStatus
+		type pid2recordStatus map[ProcessID]*recordStatus // processID2IsRecording
+		type epoch2recordStatus map[Epoch]pid2recordStatus
 
 		recordStatusForAllEpochs := make(epoch2recordStatus)
 
@@ -169,11 +169,11 @@ func doProcess(ctx context.Context, selfProcessID ProcessID, chanPairs map[Proce
 			return !ok
 		}
 		initRecordStatus := func(markerMsg MarkerMsg) {
-			s := make(recordStatus)
+			s := make(pid2recordStatus)
 			recordStatusForAllEpochs[Epoch(markerMsg)] = s
 			for _, chanPair := range chanPairs {
 				pid := chanPair.ProcessID
-				s[pid] = &isRecording{
+				s[pid] = &recordStatus{
 					ProcessID:      pid,
 					FromChanName:   chanPair.fromChan.Name,
 					Recording:      true,
@@ -181,7 +181,7 @@ func doProcess(ctx context.Context, selfProcessID ProcessID, chanPairs map[Proce
 				}
 			}
 		}
-		getCurrRecordStatus := func(markerMsg MarkerMsg) recordStatus {
+		getCurrRecordStatus := func(markerMsg MarkerMsg) pid2recordStatus {
 			return recordStatusForAllEpochs[Epoch(markerMsg)]
 		}
 

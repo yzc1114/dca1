@@ -107,8 +107,8 @@ type ProcessID int
 type RecorderMsgSource int
 
 const (
-	ProcessSource RecorderMsgSource = 1
-	ChanSource    RecorderMsgSource = 2
+	SourceProcess RecorderMsgSource = 1
+	SourceChan    RecorderMsgSource = 2
 )
 
 // RecorderMsg 传输给快照记录进程的数据。包括这次快照的ID，数据源，进程号，通道名，进程状态以及针对接入通道记录的数据。
@@ -117,10 +117,10 @@ type RecorderMsg struct {
 	Source    RecorderMsgSource
 	ProcessID ProcessID
 
-	// For Source == ProcessSource
+	// For Source == SourceProcess
 	ProcessStatus ProcessStatus
 
-	// For Source == ChanSource
+	// For Source == SourceChan
 	ChanName       string
 	RecordedValues []AppMsg
 }
@@ -143,3 +143,11 @@ func NewChanPair(pid ProcessID, fromChan *FromChanMsgWithName, toChan *ToChanMsg
 		toChan:    toChan,
 	}
 }
+
+type ProcessInfo struct {
+	ProcessID     ProcessID
+	ProcessStatus ProcessStatus
+	Msgs          map[string][]AppMsg // chan name to msgs
+}
+type SnapshotInfo map[ProcessID]*ProcessInfo
+type Epoch2SnapshotInfo map[Epoch]SnapshotInfo

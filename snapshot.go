@@ -15,74 +15,80 @@ const (
 
 var processCheckIntervalRange = []time.Duration{50 * time.Millisecond, 60 * time.Millisecond}
 
-func doSnapshotRecorderProcess(ctx context.Context, processCount int, recorderChan chan *RecorderMsg) {
-	type ProcessInfo struct {
-		ProcessID     ProcessID
-		ProcessStatus ProcessStatus
-		Msgs          map[string][]AppMsg // chan name to msgs
+type SnapshotRecorderProcess struct {
+	ctx             context.Context
+	processCount    int
+	recorderChan    chan *RecorderMsg
+	epoch2Snapshots Epoch2SnapshotInfo
+}
+
+func NewSnapshotRecorderProcess(ctx context.Context, processCount int, recorderChan chan *RecorderMsg) *SnapshotRecorderProcess {
+	return &SnapshotRecorderProcess{
+		ctx:             ctx,
+		processCount:    processCount,
+		recorderChan:    recorderChan,
+		epoch2Snapshots: make(Epoch2SnapshotInfo),
 	}
-	type snapshotInfo map[ProcessID]*ProcessInfo
-	type epoch2SnapshotInfo map[Epoch]snapshotInfo
-	epoch2Snapshots := make(epoch2SnapshotInfo)
-	// util func 1 将该记录信息对应的快照进程信息提取出来。
-	extractTargetProcessInfo := func(recorderMsg *RecorderMsg) *ProcessInfo {
-		if _, ok := epoch2Snapshots[recorderMsg.Epoch]; !ok {
-			epoch2Snapshots[recorderMsg.Epoch] = make(snapshotInfo)
+}
+
+func (rp *SnapshotRecorderProcess) extractTargetProcessInfo(recorderMsg *RecorderMsg) *ProcessInfo {
+	if _, ok := rp.epoch2Snapshots[recorderMsg.Epoch]; !ok {
+		rp.epoch2Snapshots[recorderMsg.Epoch] = make(SnapshotInfo)
+	}
+	snapshot := rp.epoch2Snapshots[recorderMsg.Epoch]
+	processID := recorderMsg.ProcessID
+	if _, ok := snapshot[processID]; !ok {
+		snapshot[processID] = &ProcessInfo{
+			ProcessID:     processID,
+			ProcessStatus: ProcessStatus(-1),
+			Msgs:          make(map[string][]AppMsg),
 		}
-		snapshot := epoch2Snapshots[recorderMsg.Epoch]
-		processID := recorderMsg.ProcessID
-		if _, ok := snapshot[processID]; !ok {
-			snapshot[processID] = &ProcessInfo{
-				ProcessID:     processID,
-				ProcessStatus: ProcessStatus(-1),
-				Msgs:          make(map[string][]AppMsg),
+	}
+	return snapshot[recorderMsg.ProcessID]
+}
+
+func (rp *SnapshotRecorderProcess) getFinishedEpochs() []Epoch {
+	finishedEpochs := make([]Epoch, 0)
+nextEpoch:
+	for epoch, snapshot := range rp.epoch2Snapshots {
+		if len(snapshot) < rp.processCount {
+			continue
+		}
+		for _, processInfo := range snapshot {
+			if processInfo.ProcessStatus == ProcessStatus(-1) {
+				continue nextEpoch
+			}
+			if len(processInfo.Msgs) < rp.processCount-1 {
+				continue nextEpoch
 			}
 		}
-		return snapshot[recorderMsg.ProcessID]
+		finishedEpochs = append(finishedEpochs, epoch)
 	}
+	return finishedEpochs
+}
 
-	// util func 2 获取已经结束记录的快照ID
-	getFinishedEpochs := func() []Epoch {
-		finishedEpochs := make([]Epoch, 0)
-	nextEpoch:
-		for epoch, snapshot := range epoch2Snapshots {
-			if len(snapshot) < processCount {
-				continue
-			}
-			for _, processInfo := range snapshot {
-				if processInfo.ProcessStatus == ProcessStatus(-1) {
-					continue nextEpoch
-				}
-				if len(processInfo.Msgs) < processCount-1 {
-					continue nextEpoch
-				}
-			}
-			finishedEpochs = append(finishedEpochs, epoch)
-		}
-		return finishedEpochs
+func (rp *SnapshotRecorderProcess) getPrintUtil() (func(epoch Epoch), func(epoch Epoch) bool, func(epoch Epoch)) {
+	printedEpochs := make(map[Epoch]bool)
+	addPrintedEpoch := func(epoch Epoch) {
+		printedEpochs[epoch] = true
 	}
-
-	// util func 3 获取已经输出过得快照以及，判断快照是否输出过。
-	addPrintedEpoch, isEpochPrinted := func() (func(epoch Epoch), func(epoch Epoch) bool) {
-		printedEpochs := make(map[Epoch]bool)
-		addPrintedEpoch := func(epoch Epoch) {
-			printedEpochs[epoch] = true
-		}
-		isEpochPrinted := func(epoch Epoch) bool {
-			_, ok := printedEpochs[epoch]
-			return ok
-		}
-		return addPrintedEpoch, isEpochPrinted
-	}()
-
-	// util func 4 打印快照到日志
-	printSnapshot := func(epoch Epoch) {
-		snapshot := epoch2Snapshots[epoch]
+	isEpochPrinted := func(epoch Epoch) bool {
+		_, ok := printedEpochs[epoch]
+		return ok
+	}
+	printer := func(epoch Epoch) {
+		snapshot := rp.epoch2Snapshots[epoch]
 		if snapshot == nil {
 			log.Fatalf("printSnapshot epoch not exists, epoch = [%v]", epoch)
 		}
-		log.Printf("start print epoch %v snapshot...", epoch)
-		for pid, processInfo := range snapshot {
+		log.Printf("Start print epoch %v snapshot...", epoch)
+		processIDs := make([]int, 0, len(snapshot))
+		for pid := range snapshot {
+			processIDs = append(processIDs, int(pid))
+		}
+		sort.Ints(processIDs)
+		for _, pid := range processIDs {
+			processInfo := snapshot[ProcessID(pid)]
 			log.Printf("processID = [%v]", pid)
 			log.Printf("processStatus = [%v]", processInfo.ProcessStatus)
 			log.Printf("process's recordMsgs from each chan...")
@@ -92,22 +98,26 @@ func doSnapshotRecorderProcess(ctx context.Context, processCount int, recorderCh
 		}
 		log.Printf("finished print epoch %v snapshot...", epoch)
 	}
-	// start main routine loop
-	log.Printf("start recorder main routine loop")
+	return addPrintedEpoch, isEpochPrinted, printer
+}
+
+func (rp *SnapshotRecorderProcess) Start() {
+	log.Printf("Start recorder main routine loop")
+	addPrintedEpoch, isEpochPrinted, printer := rp.getPrintUtil()
 	for {
 		select {
-		case m := <-recorderChan:
-			targetProcessInfo := extractTargetProcessInfo(m)
+		case m := <-rp.recorderChan:
+			targetProcessInfo := rp.extractTargetProcessInfo(m)
 			source := m.Source
 			switch source {
-			case ProcessSource:
+			case SourceProcess:
 				targetProcessInfo.ProcessStatus = m.ProcessStatus
-			case ChanSource:
+			case SourceChan:
 				targetProcessInfo.Msgs[m.ChanName] = m.RecordedValues
 			default:
 				log.Fatalf("source not specified or violated, m = {%v}", m)
 			}
-		case <-ctx.Done():
+		case <-rp.ctx.Done():
 			log.Printf("snapshot recorder shutdown.")
 			// 优雅关停
 			return
@@ -115,159 +125,172 @@ func doSnapshotRecorderProcess(ctx context.Context, processCount int, recorderCh
 			time.Sleep(recorderCheckInterval)
 			// check finished epochs
 		}
-		finishedEpochs := getFinishedEpochs()
+		finishedEpochs := rp.getFinishedEpochs()
 		for _, epoch := range finishedEpochs {
 			if isEpochPrinted(epoch) {
 				continue
 			}
-			printSnapshot(epoch)
+			printer(epoch)
 			addPrintedEpoch(epoch)
 		}
 	}
 }
 
-func doProcess(ctx context.Context, selfProcessID ProcessID, chanPairs map[ProcessID]*ChanPair, recorderChan chan *RecorderMsg, shouldStartSnapshot func(processID ProcessID, processStatus ProcessStatus) bool) {
-	processStatus := 0
-	if shouldStartSnapshot == nil {
-		shouldStartSnapshot = func(pid ProcessID, processStatus ProcessStatus) bool {
-			return false
+type AppProcess struct {
+	ctx                 context.Context
+	processStatus       ProcessStatus
+	selfProcessID       ProcessID
+	chanPairs           map[ProcessID]*ChanPair
+	recorderChan        chan *RecorderMsg
+	shouldStartSnapshot func(processID ProcessID, processStatus ProcessStatus) bool
+}
+
+func NewAppProcess(ctx context.Context, selfProcessID ProcessID, chanPairs map[ProcessID]*ChanPair, recorderChan chan *RecorderMsg, shouldStartSnapshot func(processID ProcessID, processStatus ProcessStatus) bool) *AppProcess {
+	return &AppProcess{
+		ctx:                 ctx,
+		processStatus:       0,
+		selfProcessID:       selfProcessID,
+		chanPairs:           chanPairs,
+		recorderChan:        recorderChan,
+		shouldStartSnapshot: shouldStartSnapshot,
+	}
+}
+
+func (a *AppProcess) getNextProcessID() ProcessID {
+	keys := make([]int, 0, len(a.chanPairs))
+	for k := range a.chanPairs {
+		if k != adminPid {
+			keys = append(keys, int(k))
 		}
 	}
-
-	getNextProcessID := func(selfProcessID ProcessID) ProcessID {
-		keys := make([]int, 0, len(chanPairs))
-		for k := range chanPairs {
-			if k != adminPid {
-				keys = append(keys, int(k))
-			}
-		}
-		sort.Ints(keys)
-		idx := sort.SearchInts(keys, int(selfProcessID))
-		idx = idx % len(keys)
-		if keys[idx] != int(selfProcessID) {
-			return ProcessID(keys[idx])
-		}
-		idx = (idx + 1) % len(keys)
+	sort.Ints(keys)
+	idx := sort.SearchInts(keys, int(a.selfProcessID))
+	idx = idx % len(keys)
+	if keys[idx] != int(a.selfProcessID) {
 		return ProcessID(keys[idx])
 	}
+	idx = (idx + 1) % len(keys)
+	return ProcessID(keys[idx])
+}
 
-	// 使用闭包定义在主循环中使用的各类函数。
-	dealWithMarkerMsgIncoming, addRecordMsgIfNecessary := func() (func(markerMsg MarkerMsg, fromProcessID ProcessID), func(fromChanName string, msg AppMsg)) {
-		type recordStatus struct {
-			ProcessID      ProcessID
-			Recording      bool
-			FromChanName   string
-			RecordedValues []AppMsg
-		}
-		type pid2recordStatus map[ProcessID]*recordStatus // processID2IsRecording
-		type epoch2recordStatus map[Epoch]pid2recordStatus
+func (a *AppProcess) genMarkerMsgUtil() (func(markerMsg MarkerMsg, fromProcessID ProcessID), func(fromChanName string, msg AppMsg)) {
+	type recordStatus struct {
+		ProcessID      ProcessID
+		Recording      bool
+		FromChanName   string
+		RecordedValues []AppMsg
+	}
+	type pid2recordStatus map[ProcessID]*recordStatus // processID2IsRecording
+	type epoch2recordStatus map[Epoch]pid2recordStatus
 
-		recordStatusForAllEpochs := make(epoch2recordStatus)
+	recordStatusForAllEpochs := make(epoch2recordStatus)
 
-		isNewMarkerMsg := func(markerMsg MarkerMsg) bool {
-			_, ok := recordStatusForAllEpochs[Epoch(markerMsg)]
-			return !ok
-		}
-		initRecordStatus := func(markerMsg MarkerMsg) {
-			s := make(pid2recordStatus)
-			recordStatusForAllEpochs[Epoch(markerMsg)] = s
-			for _, chanPair := range chanPairs {
-				pid := chanPair.ProcessID
-				s[pid] = &recordStatus{
-					ProcessID:      pid,
-					FromChanName:   chanPair.fromChan.Name,
-					Recording:      true,
-					RecordedValues: make([]AppMsg, 0),
-				}
+	isNewMarkerMsg := func(markerMsg MarkerMsg) bool {
+		_, ok := recordStatusForAllEpochs[Epoch(markerMsg)]
+		return !ok
+	}
+	initRecordStatus := func(markerMsg MarkerMsg) {
+		s := make(pid2recordStatus)
+		recordStatusForAllEpochs[Epoch(markerMsg)] = s
+		for _, chanPair := range a.chanPairs {
+			pid := chanPair.ProcessID
+			s[pid] = &recordStatus{
+				ProcessID:      pid,
+				FromChanName:   chanPair.fromChan.Name,
+				Recording:      true,
+				RecordedValues: make([]AppMsg, 0),
 			}
 		}
-		getCurrRecordStatus := func(markerMsg MarkerMsg) pid2recordStatus {
-			return recordStatusForAllEpochs[Epoch(markerMsg)]
-		}
+	}
+	getCurrRecordStatus := func(markerMsg MarkerMsg) pid2recordStatus {
+		return recordStatusForAllEpochs[Epoch(markerMsg)]
+	}
 
-		dealWithMarkerMsgIncoming := func(markerMsg MarkerMsg, fromProcessID ProcessID) {
-			// start snapshot
-			stopRecordingSendValues := func(pid ProcessID) {
-				rs := getCurrRecordStatus(markerMsg)
-				s := rs[pid]
-				s.Recording = false
-				log.Printf("Process %d stop recording from Process %d, RecordedValues = [%+v]", selfProcessID, pid, s.RecordedValues)
-				recorderChan <- &RecorderMsg{
-					Source:         ChanSource,
-					ProcessID:      selfProcessID,
-					ChanName:       s.FromChanName,
-					RecordedValues: s.RecordedValues,
-				}
+	dealWithMarkerMsgIncoming := func(markerMsg MarkerMsg, fromProcessID ProcessID) {
+		// Start snapshot
+		stopRecordingSendValues := func(pid ProcessID) {
+			rs := getCurrRecordStatus(markerMsg)
+			s := rs[pid]
+			s.Recording = false
+			log.Printf("Process %d stop recording from Process %d, RecordedValues = [%+v]", a.selfProcessID, pid, s.RecordedValues)
+			a.recorderChan <- &RecorderMsg{
+				Source:         SourceChan,
+				ProcessID:      a.selfProcessID,
+				ChanName:       s.FromChanName,
+				RecordedValues: s.RecordedValues,
 			}
-			if isNewMarkerMsg(markerMsg) {
-				// 第一次收到MarkerMsg，首先将自己的进程信息记录，随后向所有其他进程发送MarkerMsg
-				log.Printf("Process %d received first MarkerMsg %v", selfProcessID, markerMsg)
-				initRecordStatus(markerMsg)
-				log.Printf("Process %d sending ProcessStatus %d", selfProcessID, processStatus)
-				recorderChan <- &RecorderMsg{
-					Source:        ProcessSource,
-					ProcessID:     selfProcessID,
-					ProcessStatus: ProcessStatus(processStatus),
-				}
-				if fromProcessID != selfProcessID {
-					stopRecordingSendValues(fromProcessID)
-				}
-				// 向其他全部的toChan发送MarkerMsg
-				for _, chanPair := range chanPairs {
-					if chanPair.ProcessID == adminPid {
-						continue
-					}
-					chanPair.toChan.C <- markerMsg
-				}
-			} else {
-				// 不是第一次收到marker msg，则将此次的发信者记录停止，并将内容发送至记录者手中。
+		}
+		if isNewMarkerMsg(markerMsg) {
+			// 第一次收到MarkerMsg，首先将自己的进程信息记录，随后向所有其他进程发送MarkerMsg
+			log.Printf("Process %d received first MarkerMsg %v", a.selfProcessID, markerMsg)
+			initRecordStatus(markerMsg)
+			log.Printf("Process %d sending ProcessStatus %d", a.selfProcessID, a.processStatus)
+			a.recorderChan <- &RecorderMsg{
+				Source:        SourceProcess,
+				ProcessID:     a.selfProcessID,
+				ProcessStatus: a.processStatus,
+			}
+			if fromProcessID != adminPid {
 				stopRecordingSendValues(fromProcessID)
 			}
+			// 向其他全部的toChan发送MarkerMsg
+			for _, chanPair := range a.chanPairs {
+				if chanPair.ProcessID == adminPid {
+					continue
+				}
+				chanPair.toChan.C <- markerMsg
+			}
+		} else {
+			// 不是第一次收到marker msg，则将此次的发信者记录停止，并将内容发送至记录者手中。
+			stopRecordingSendValues(fromProcessID)
 		}
+	}
 
-		addRecordMsgIfNecessary := func(fromChanName string, msg AppMsg) {
-			for _, rs := range recordStatusForAllEpochs {
-				for _, ir := range rs {
-					if ir.FromChanName == fromChanName && ir.Recording {
-						ir.RecordedValues = append(ir.RecordedValues, msg)
-					}
+	addRecordMsgIfNecessary := func(fromChanName string, msg AppMsg) {
+		for _, rs := range recordStatusForAllEpochs {
+			for _, ir := range rs {
+				if ir.FromChanName == fromChanName && ir.Recording {
+					ir.RecordedValues = append(ir.RecordedValues, msg)
 				}
 			}
 		}
+	}
 
-		return dealWithMarkerMsgIncoming, addRecordMsgIfNecessary
-	}()
+	return dealWithMarkerMsgIncoming, addRecordMsgIfNecessary
+}
 
-	log.Printf("start process %d main routine loop", selfProcessID)
+func (a *AppProcess) start() {
+	log.Printf("Start process %d main routine loop", a.selfProcessID)
+	dealWithMarkerMsgIncoming, addRecordMsgIfNecessary := a.genMarkerMsgUtil()
 	for {
-		for fromProcessID, chanPair := range chanPairs {
+		for fromProcessID, chanPair := range a.chanPairs {
 			select {
 			case m := <-chanPair.fromChan.C:
 				switch m.(type) {
 				case MarkerMsg:
-					log.Printf("Process %d received MarkerMsg %+v from Process %d", selfProcessID, m.(MarkerMsg), fromProcessID)
+					log.Printf("Process %d received MarkerMsg %+v from Process %d", a.selfProcessID, m.(MarkerMsg), fromProcessID)
 					dealWithMarkerMsgIncoming(m.(MarkerMsg), fromProcessID)
 				case AppMsg:
 					addRecordMsgIfNecessary(chanPair.fromChan.Name, m.(AppMsg))
-					processStatus++
-					log.Printf("Process %d received AppMsg from Process %d, msg content = [%+v], curr ProcessStatus = %d", selfProcessID, fromProcessID, m.(AppMsg), processStatus)
-					nextProcessID := getNextProcessID(selfProcessID)
-					log.Printf("Process %d sending AppMsg to Process %d", selfProcessID, nextProcessID)
-					nextChanPair := chanPairs[nextProcessID]
+					a.processStatus++
+					log.Printf("Process %d received AppMsg from Process %d, msg content = [%+v], curr ProcessStatus = %d", a.selfProcessID, fromProcessID, m.(AppMsg), a.processStatus)
+					nextProcessID := a.getNextProcessID()
+					log.Printf("Process %d sending AppMsg to Process %d", a.selfProcessID, nextProcessID)
+					nextChanPair := a.chanPairs[nextProcessID]
 					nextChanPair.toChan.C <- m
-					if shouldStartSnapshot(selfProcessID, ProcessStatus(processStatus)) {
-						log.Printf("Process %d start snapshot, current processStatus = %d", selfProcessID, processStatus)
+					if a.shouldStartSnapshot(a.selfProcessID, ProcessStatus(a.processStatus)) {
+						log.Printf("Process %d Start snapshot, current processStatus = %d", a.selfProcessID, a.processStatus)
 						// 算法启动时，认为从一个不存在的通道上接收到了一个标记
 						epoch := genNewSnapshotEpoch()
 						markerMsg := MarkerMsg(epoch)
-						dealWithMarkerMsgIncoming(markerMsg, selfProcessID)
+						dealWithMarkerMsgIncoming(markerMsg, adminPid)
 					}
 				default:
-					log.Fatalf("process %d received invalid msg = [%+v]", selfProcessID, m)
+					log.Fatalf("process %d received invalid msg = [%+v]", a.selfProcessID, m)
 				}
-			case <-ctx.Done():
+			case <-a.ctx.Done():
 				// 优雅关停
-				log.Printf("process %d shutdown.", selfProcessID)
+				log.Printf("process %d shutdown.", a.selfProcessID)
 				return
 			default:
 				// 没收到消息直接访问下一个fromChan
@@ -281,7 +304,7 @@ func doProcess(ctx context.Context, selfProcessID ProcessID, chanPairs map[Proce
 	}
 }
 
-func StartRoutines(pids []ProcessID, shouldStartSnapshot func(pid ProcessID, status ProcessStatus) bool, kickerPID ProcessID) {
+func StartRoutinesV2(pids []ProcessID, shouldStartSnapshot func(pid ProcessID, status ProcessStatus) bool, kickerPID ProcessID) {
 	recorderChan := NewRecorderMsgChan()
 	fromChans := make(map[ProcessID]map[ProcessID]*FromChanMsgWithName)
 	toChans := make(map[ProcessID]map[ProcessID]*ToChanMsgWithName)
@@ -314,7 +337,7 @@ func StartRoutines(pids []ProcessID, shouldStartSnapshot func(pid ProcessID, sta
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go doSnapshotRecorderProcess(ctx, len(pids), recorderChan)
+	go NewSnapshotRecorderProcess(ctx, len(pids), recorderChan).Start()
 	pid2ChanPairs := make(map[ProcessID]map[ProcessID]*ChanPair)
 	for _, pid := range pids {
 		cps := make(map[ProcessID]*ChanPair)
@@ -329,7 +352,7 @@ func StartRoutines(pids []ProcessID, shouldStartSnapshot func(pid ProcessID, sta
 		pid2ChanPairs[pid] = cps
 	}
 	for pid, cps := range pid2ChanPairs {
-		go doProcess(ctx, pid, cps, recorderChan, shouldStartSnapshot)
+		go NewAppProcess(ctx, pid, cps, recorderChan, shouldStartSnapshot).start()
 	}
 
 	adminChans[kickerPID].to.C <- AppMsg("AppMsg")

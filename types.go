@@ -3,6 +3,7 @@ package main
 import (
 	"strconv"
 	"sync"
+	"time"
 )
 
 const (
@@ -37,6 +38,14 @@ var genNewSnapshotEpoch = func() func() Epoch {
 		return Epoch(epoch)
 	}
 }()
+
+func getEpochByMarker(m MarkerMsg) Epoch {
+	return Epoch(m)
+}
+
+func getMarkerMsgByEpoch(e Epoch) MarkerMsg {
+	return MarkerMsg(e)
+}
 
 // ProcessStatus 程序状态值。
 type ProcessStatus int
@@ -132,15 +141,15 @@ func NewRecorderMsgChan() chan *RecorderMsg {
 // ChanPair 针对每个进程提供的一组进出通道。
 type ChanPair struct {
 	ProcessID ProcessID            // 目标进程号
-	fromChan  *FromChanMsgWithName // 从该目标进程到本进程的通道
-	toChan    *ToChanMsgWithName   // 从本进程到目标进程的通道
+	FromChan  *FromChanMsgWithName // 从该目标进程到本进程的通道
+	ToChan    *ToChanMsgWithName   // 从本进程到目标进程的通道
 }
 
 func NewChanPair(pid ProcessID, fromChan *FromChanMsgWithName, toChan *ToChanMsgWithName) *ChanPair {
 	return &ChanPair{
 		ProcessID: pid,
-		fromChan:  fromChan,
-		toChan:    toChan,
+		FromChan:  fromChan,
+		ToChan:    toChan,
 	}
 }
 
@@ -151,3 +160,9 @@ type ProcessInfo struct {
 }
 type SnapshotInfo map[ProcessID]*ProcessInfo
 type Epoch2SnapshotInfo map[Epoch]SnapshotInfo
+
+type SnapshotAppConf struct {
+	AppMsgs                           []AppMsg
+	AppProcessMainLoopIntervalBetween []time.Duration
+	RecorderMainLoopInterval          time.Duration
+}

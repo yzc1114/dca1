@@ -1,12 +1,18 @@
 package main
 
-import "log"
+import (
+	"log"
+	"time"
+)
 
 func main() {
-	// startThreeRoutines()
 	log.Printf("Start routines...")
-	StartRoutinesV2([]ProcessID{1, 2, 3, 4}, func(pid ProcessID, status ProcessStatus) bool {
-		if pid == 1 && status == 10 {
+	SetConf(&SnapshotAppConf{
+		AppMsgs:                           []AppMsg{"AppMsg1"},                                          // 给出了程序传送哪些消息，是一个切片，程序间可以传输多个消息。按照题意，这里应该是1个消息。
+		AppProcessMainLoopIntervalBetween: []time.Duration{5 * time.Millisecond, 10 * time.Millisecond}, // 决定了程序运行的快慢
+	})
+	StartRoutines([]ProcessID{1, 2, 3, 4}, func(pid ProcessID, status ProcessStatus) bool {
+		if pid == 1 && (status == 101 || status == 201) {
 			return true
 		}
 		return false
